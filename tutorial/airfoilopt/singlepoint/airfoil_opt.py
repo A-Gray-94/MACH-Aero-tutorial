@@ -11,21 +11,43 @@ from pygeo import DVGeometry, DVConstraints
 from pyoptsparse import Optimization, OPT
 from idwarp import USMesh
 from multipoint import multiPointSparse
+import argparse
+
+
+def ksAgg(g, rho=1.0):
+    """Compute a smooth approximation to the maximum of a set of values us KS agregation
+    Parameters
+    ----------
+    g : 1d array
+        Values to approximate the maximum of
+    rho : float, optional
+        KS Weight parameter, larger values give a closer but less smooth approximation of the maximum, by default 100.0
+    Returns
+    -------
+    float
+        The KS agregated value
+    """
+    maxg = np.max(g)
+    return maxg + 1.0 / rho * np.log(np.sum(np.exp(rho * (g - maxg))))
+
+
+parser = argparse.ArgumentParser()
+
+# Problem/task options
+parser.add_argument("--mach", type=float, default=0.75)
+parser.add_argument("--output", type=str, default="output")
+parser.add_argument("--cl", type=float, default=0.5)
+parser.add_argument("--alt", type=int, default=1e4)
+parser.add_argument("--preTrim", action="store_true", dest="preTrim", default=True)
+parser.add_argument("--volCon", action="store_true", dest="volCon", default=False)
+parser.add_argument("--volUpper", type=float, default=0.07)
+parser.add_argument("--volLower", type=float, default=0.064837137176294343)
+parser.add_argument("--tcMin", type=float, default=0.12)
+args = parser.parse_args()
+
+outputDirectory = args.output
 
 # rst Imports (end)
-# ======================================================================
-#         Specify parameters for optimization
-# ======================================================================
-# rst parameters (beg)
-# cL constraint
-mycl = 0.5
-# angle of attack
-alpha = 1.5
-# mach number
-mach = 0.75
-# cruising altitude
-alt = 10000
-# rst parameters (end)
 # ======================================================================
 #         Create multipoint communication object
 # ======================================================================
@@ -33,9 +55,8 @@ alt = 10000
 MP = multiPointSparse(MPI.COMM_WORLD)
 MP.addProcessorSet("cruise", nMembers=1, memberSizes=MPI.COMM_WORLD.size)
 comm, setComm, setFlags, groupFlags, ptID = MP.createCommunicators()
-outputDirectory = "output"
 if comm.rank == 0:
-    os.mkdir(outputDirectory)
+    os.system(f"mkdir -p {outputDirectory}")
 # rst multipoint (end)
 # ======================================================================
 #         ADflow Set-up
@@ -43,24 +64,30 @@ if comm.rank == 0:
 # rst adflow (beg)
 aeroOptions = {
     # Common Parameters
-    "gridFile": "n0012.cgns",
+    "gridFile": "../mesh/n0012.cgns",
     "outputDirectory": outputDirectory,
     # Physics Parameters
     "equationType": "RANS",
-    "smoother": "dadi",
-    "MGCycle": "sg",
-    "nCycles": 20000,
+    "smoother": "DADI",
+    "MGCycle": "3w",
+    "nCycles": 5000,
+    "nCyclesCoarse": 250,
     "monitorvariables": ["resrho", "cl", "cd", "cmz", "yplus"],
     "useNKSolver": True,
     "useanksolver": True,
     "nsubiterturb": 10,
     "liftIndex": 2,
-    "infchangecorrection": True,
+    "infchangecorrection": False,
+    "RKReset": True,
+    "nRKReset": 5,
+    # "ANKSwitchTol":1e-2,
+    # "ANKSecondOrdSwitchTol":1e-4,
+    # "ANKCoupledSwitchTol":1e-5,
     # Convergence Parameters
     "L2Convergence": 1e-15,
     "L2ConvergenceCoarse": 1e-4,
     # Adjoint Parameters
-    "adjointSolver": "gmres",
+    "adjointSolver": "GMRES",
     "adjointL2Convergence": 1e-12,
     "ADPC": True,
     "adjointMaxIter": 5000,
@@ -77,28 +104,42 @@ aeroOptions = {
     "NKInnerPreConIts": 3,
     "writeSurfaceSolution": False,
     "writeVolumeSolution": False,
+    "writeTecplotSurfaceSolution": True,
     "frozenTurbulence": False,
-    "restartADjoint": False,
+    "restartADjoint": True,
 }
 
 # Create solver
 CFDSolver = ADFLOW(options=aeroOptions, comm=comm)
-CFDSolver.addLiftDistribution(200, "z")
+# CFDSolver.addLiftDistribution(200, "z")
 # rst adflow (end)
 # ======================================================================
 #         Set up flow conditions with AeroProblem
 # ======================================================================
 # rst aeroproblem (beg)
-ap = AeroProblem(name="fc", alpha=alpha, mach=mach, altitude=alt, areaRef=1.0, chordRef=1.0, evalFuncs=["cl", "cd"])
+alpha0 = 1.0
+ap = AeroProblem(
+    name="fc",
+    alpha=np.clip(alpha0, -4.0, 4.0),
+    mach=args.mach,
+    altitude=args.alt,
+    areaRef=1.0,
+    chordRef=1.0,
+    evalFuncs=["cl", "cd"],
+)
+
+# --- Optionally do a trim solve so that we start at the right CL ---
+if args.preTrim:
+    CFDSolver.solveCL(ap, args.cl, delta=0.1, tol=1e-4, autoReset=False)
 # Add angle of attack variable
-ap.addDV("alpha", value=alpha, lower=0, upper=10.0, scale=1.0)
+ap.addDV("alpha", lower=-10.0, upper=10.0, scale=1.0)
 # rst aeroproblem (end)
 # ======================================================================
 #         Geometric Design Variable Set-up
 # ======================================================================
 # rst dvgeo (beg)
 # Create DVGeometry object
-FFDFile = "ffd.xyz"
+FFDFile = "../ffd/ffd.xyz"
 
 DVGeo = DVGeometry(FFDFile)
 DVGeo.addGeoDVLocal("shape", lower=-0.05, upper=0.05, axis="y", scale=1.0)
@@ -149,8 +190,13 @@ le = 0.0001
 leList = [[le, 0, le], [le, 0, 1.0 - le]]
 teList = [[1.0 - le, 0, le], [1.0 - le, 0, 1.0 - le]]
 
-DVCon.addVolumeConstraint(leList, teList, 2, 100, lower=0.064837137176294343, upper=0.07, scaled=False)
-DVCon.addThicknessConstraints2D(leList, teList, 2, 100, lower=0.1, upper=3.0)
+if args.volCon:
+    DVCon.addVolumeConstraint(leList, teList, 2, 100, lower=args.volLower, upper=args.volUpper, scaled=False)
+
+DVCon.addThicknessConstraints2D(
+    leList, teList, 2, 100, scaled=False, addToPyOpt=False
+)  # These thickness constraints are not applied directly, they are used for the KSThickness constraint
+DVCon.addThicknessConstraints2D(leList, teList, 2, 100, lower=0.0, upper=3.0)
 
 if comm.rank == 0:
     fileName = os.path.join(outputDirectory, "constraints.dat")
@@ -160,7 +206,7 @@ if comm.rank == 0:
 #         Mesh Warping Set-up
 # ======================================================================
 # rst warp (beg)
-meshOptions = {"gridFile": "n0012.cgns"}
+meshOptions = {"gridFile": "../mesh/n0012.cgns"}
 
 mesh = USMesh(options=meshOptions, comm=comm)
 CFDSolver.setMesh(mesh)
@@ -196,10 +242,11 @@ def cruiseFuncsSens(x, funcs):
     return funcsSens
 
 
-def objCon(funcs, printOK):
+def objCon(funcs, printOK, passThroughFuncs):
     # Assemble the objective and any additional constraints:
     funcs["obj"] = funcs[ap["cd"]]
-    funcs["cl_con_" + ap.name] = funcs[ap["cl"]] - mycl
+    funcs["cl_con_" + ap.name] = funcs[ap["cl"]] - args.cl
+    funcs["KSThickness"] = ksAgg(funcs["DVCon1_thickness_constraints_0"], rho=1e4)
     if printOK:
         print("funcs in obj:", funcs)
     return funcs
@@ -225,6 +272,7 @@ DVGeo.addVariablesPyOpt(optProb)
 # Add constraints
 DVCon.addConstraintsPyOpt(optProb)
 optProb.addCon("cl_con_" + ap.name, lower=0.0, upper=0.0, scale=1.0)
+optProb.addCon("KSThickness", lower=args.tcMin, scale=1.0 / args.tcMin, wrt="shape")
 
 # The MP object needs the 'obj' and 'sens' function for each proc set,
 # the optimization problem and what the objcon function is:
@@ -236,7 +284,7 @@ optProb.printSparsity()
 # rst optprob (end)
 # rst optimizer
 # Set up optimizer
-optimizer = "SLSQP"
+optimizer = "SNOPT"
 if optimizer == "SLSQP":
     optOptions = {"IFILE": os.path.join(outputDirectory, "SLSQP.out")}
     opt = OPT("slsqp", options=optOptions)
@@ -244,11 +292,14 @@ elif optimizer == "SNOPT":
     optOptions = {
         "Major feasibility tolerance": 1e-4,
         "Major optimality tolerance": 1e-4,
-        "Difference interval": 1e-3,
+        "Difference interval": 1e-5,
         "Hessian full memory": None,
         "Function precision": 1e-8,
         "Print file": os.path.join(outputDirectory, "SNOPT_print.out"),
         "Summary file": os.path.join(outputDirectory, "SNOPT_summary.out"),
+        "Nonderivative linesearch": None,
+        "Verify level": 0,
+        "Major step limit": 0.5,
     }
     opt = OPT("snopt", options=optOptions)
 
