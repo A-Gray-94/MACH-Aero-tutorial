@@ -38,12 +38,17 @@ parser.add_argument("--mach", type=float, default=0.75)
 parser.add_argument("--output", type=str, default="output")
 parser.add_argument("--cl", type=float, default=0.5)
 parser.add_argument("--alt", type=int, default=1e4)
-parser.add_argument("--preTrim", action="store_true", dest="preTrim", default=True)
+parser.add_argument("--preTrim", action="store_true", dest="preTrim", default=False)
 parser.add_argument("--volCon", action="store_true", dest="volCon", default=False)
 parser.add_argument("--volUpper", type=float, default=0.07)
 parser.add_argument("--volLower", type=float, default=0.064837137176294343)
 parser.add_argument("--tcMin", type=float, default=0.12)
-args = parser.parse_args()
+parser.add_argument("--zeroLift", action="store_true", dest="zeroLift", default=False)
+parser.add_argument("--relThickLower", type=float, default=0.1)
+args=parser.parse_args()
+
+if args.zeroLift:
+    args.cl = 0.
 
 outputDirectory = args.output
 
@@ -117,7 +122,7 @@ CFDSolver = ADFLOW(options=aeroOptions, comm=comm)
 #         Set up flow conditions with AeroProblem
 # ======================================================================
 # rst aeroproblem (beg)
-alpha0 = 1.0
+alpha0 = 0. if args.zeroLift else 1.0
 ap = AeroProblem(
     name="fc",
     alpha=np.clip(alpha0, -4.0, 4.0),
@@ -129,10 +134,12 @@ ap = AeroProblem(
 )
 
 # --- Optionally do a trim solve so that we start at the right CL ---
-if args.preTrim:
+if args.preTrim and not args.zeroLift:
     CFDSolver.solveCL(ap, args.cl, delta=0.1, tol=1e-4, autoReset=False)
-# Add angle of attack variable
-ap.addDV("alpha", lower=-10.0, upper=10.0, scale=1.0)
+
+if not args.zeroLift:
+    # Add angle of attack variable
+    ap.addDV("alpha", lower=-10.0, upper=10.0, scale=1.0)
 # rst aeroproblem (end)
 # ======================================================================
 #         Geometric Design Variable Set-up
@@ -196,7 +203,7 @@ if args.volCon:
 DVCon.addThicknessConstraints2D(
     leList, teList, 2, 100, scaled=False, addToPyOpt=False
 )  # These thickness constraints are not applied directly, they are used for the KSThickness constraint
-DVCon.addThicknessConstraints2D(leList, teList, 2, 100, lower=0.0, upper=3.0)
+DVCon.addThicknessConstraints2D(leList, teList, 2, 100, lower=args.relThickLower, upper=3.0)
 
 if comm.rank == 0:
     fileName = os.path.join(outputDirectory, "constraints.dat")
