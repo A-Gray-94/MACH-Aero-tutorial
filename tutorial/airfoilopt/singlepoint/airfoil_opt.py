@@ -14,6 +14,7 @@ from multipoint import multiPointSparse
 import argparse
 
 
+
 def ksAgg(g, rho=1.0):
     """Compute a smooth approximation to the maximum of a set of values us KS agregation
     Parameters
@@ -45,10 +46,13 @@ parser.add_argument("--volLower", type=float, default=0.064837137176294343)
 parser.add_argument("--tcMin", type=float, default=0.12)
 parser.add_argument("--zeroLift", action="store_true", dest="zeroLift", default=False)
 parser.add_argument("--relThickLower", type=float, default=0.1)
+parser.add_argument("--absThickLower", type=float, default=0.00035)
 args=parser.parse_args()
 
-if args.zeroLift:
+if args.zeroLift and args.cl!=0.:
     args.cl = 0.
+elif not args.zeroLift and args.cl==0.:
+    args.zeroLift=True
 
 outputDirectory = args.output
 
@@ -75,15 +79,15 @@ aeroOptions = {
     "equationType": "RANS",
     "smoother": "DADI",
     "MGCycle": "3w",
-    "nCycles": 5000,
+    "nCycles": 20000,
     "nCyclesCoarse": 250,
     "monitorvariables": ["resrho", "cl", "cd", "cmz", "yplus"],
     "useNKSolver": True,
     "useanksolver": True,
     "nsubiterturb": 10,
     "liftIndex": 2,
-    "infchangecorrection": False,
-    "RKReset": True,
+    "infchangecorrection": True,
+    "RKReset": False,
     "nRKReset": 5,
     # "ANKSwitchTol":1e-2,
     # "ANKSecondOrdSwitchTol":1e-4,
@@ -112,6 +116,7 @@ aeroOptions = {
     "writeTecplotSurfaceSolution": True,
     "frozenTurbulence": False,
     "restartADjoint": True,
+    "lowSpeedPreconditioner": args.mach<0.5,
 }
 
 # Create solver
@@ -204,6 +209,7 @@ DVCon.addThicknessConstraints2D(
     leList, teList, 2, 100, scaled=False, addToPyOpt=False
 )  # These thickness constraints are not applied directly, they are used for the KSThickness constraint
 DVCon.addThicknessConstraints2D(leList, teList, 2, 100, lower=args.relThickLower, upper=3.0)
+DVCon.addThicknessConstraints2D(leList, teList, 2, 100, lower=args.absThickLower, upper=3.0, scaled=False)
 
 if comm.rank == 0:
     fileName = os.path.join(outputDirectory, "constraints.dat")
@@ -235,6 +241,8 @@ def cruiseFuncs(x):
     DVCon.evalFunctions(funcs)
     CFDSolver.evalFunctions(ap, funcs)
     CFDSolver.checkSolutionFailure(ap, funcs)
+    if funcs["fail"]:
+        CFDSolver.resetFlow(ap)
     if MPI.COMM_WORLD.rank == 0:
         print(funcs)
     return funcs
@@ -244,6 +252,9 @@ def cruiseFuncsSens(x, funcs):
     funcsSens = {}
     DVCon.evalFunctionsSens(funcsSens)
     CFDSolver.evalFunctionsSens(ap, funcsSens)
+    CFDSolver.checkAdjointFailure(ap, funcsSens)
+    if funcsSens["fail"]:
+        CFDSolver.resetAdjoint(ap)
     if MPI.COMM_WORLD.rank == 0:
         print(funcsSens)
     return funcsSens
