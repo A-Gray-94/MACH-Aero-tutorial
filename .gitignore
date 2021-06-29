@@ -1,0 +1,16 @@
+doc/_build
+.vscode
+
+# Ignore tecplot and results files
+*.plt
+*.lay
+*.f5
+*.dcel
+*.bdf
+*slices.dat
+*disp.txt
+*.hst
+*.out
+*forces.txt
+
+*.pyc
