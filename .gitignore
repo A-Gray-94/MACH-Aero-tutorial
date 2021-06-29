@@ -8,6 +8,7 @@ doc/_build
 *.dcel
 *.bdf
 *slices.dat
+constraints.dat
 *disp.txt
 *.hst
 *.out
